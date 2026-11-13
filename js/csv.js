@@ -273,7 +273,7 @@
       if (!name) continue;
       if (excludedCols.indexOf(c) !== -1) continue;
 
-      var isGear = /^(gear|передача|передача\.?)$/i.test(name);
+      var isGear = /^(gear|gearlever|selector|передача|передача\.?)$/i.test(name);
       if (isGear) {
         gearColumn = rows.map(function (row) {
           var v = (row[c] || '').trim();

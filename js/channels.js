@@ -47,6 +47,15 @@
     AlternatorCharge: { label: 'Заряд генератора', unit: '%' },
     AccelPedalPos: { label: 'Положение педали акселератора', unit: '%' },
 
+    InputSpeed: { label: 'Обороты входного вала АКПП', unit: 'об/мин' },
+    GearOil: { label: 'Температура масла АКПП', unit: '°C' },
+    EngTorque: { label: 'Крутящий момент двигателя', unit: 'Н·м' },
+    ChangingLaw: { label: 'Закон переключения АКПП' },
+    GearLever: { label: 'Селектор АКПП' },
+    SPORT: { label: 'Режим SPORT' },
+    SNOW: { label: 'Режим SNOW' },
+    GEAR_OIL: { label: 'Индикатор масла АКПП' },
+
     AirFlowInstr: { label: 'Расход воздуха (прибор)' },
     AirFlow: { label: 'Расход воздуха' },
     ThrottleAngleInstr: { label: 'Угол дросселя (прибор)', unit: '%' },
@@ -113,6 +122,11 @@
       channels: ['OilPress', 'OilPressInstr', 'OilTemp', 'OilPumpValve']
     },
     {
+      id: 'gearbox', title: 'АКПП',
+      channels: ['InputSpeed', 'GearOil', 'EngTorque', 'OilPress', 'OilPressInstr',
+        'SPORT', 'SNOW', 'GEAR_OIL', 'ChangingLaw']
+    },
+    {
       id: 'electrical', title: 'Электрика',
       channels: ['Battery', 'AlternatorTemp', 'AlternatorCurrent', 'AlternatorCharge', 'ECUtemp']
     },
@@ -129,6 +143,7 @@
     { id: 'ignition', title: 'Зажигание', channels: ['Cyl.1Adv', 'Cyl.2Adv', 'Cyl.3Adv', 'Cyl.4Adv', 'KnockSensor'] },
     { id: 'air', title: 'Воздух', channels: ['AirFlow', 'AirManifold', 'ThrottleAngle', 'AccelPedalPos', 'Revs'] },
     { id: 'oil', title: 'Масло', channels: ['OilPress', 'OilPressInstr', 'OilTemp', 'OilPumpValve'] },
+    { id: 'gearbox', title: 'АКПП', channels: ['InputSpeed', 'GearOil', 'EngTorque', 'OilPress', 'OilPressInstr'] },
     { id: 'timing', title: 'Фазы', channels: ['InCamDephaser', 'ExCamDephaser', 'InCamDephaserValve', 'ExCamDephaserValve', 'ValveLift'] },
     { id: 'electrical', title: 'Электрика', channels: ['Battery', 'AlternatorTemp', 'AlternatorCurrent', 'AlternatorCharge', 'ECUtemp'] },
     { id: 'torque', title: 'Момент', channels: ['TorqIgnAdv', 'TorqAirFlow', 'TorqLost', 'AirFlow', 'Revs'] }

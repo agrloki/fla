@@ -316,7 +316,7 @@
   }
 
   function renderAnalysis(report) {
-    var meta = [formatInt(report.results.length) + ' проверок'];
+    var meta = [report.kind === 'at' ? 'Лог АКПП' : 'Лог двигателя', formatInt(report.results.length) + ' проверок'];
     if (state.dataset && state.dataset.xMode === 'date') {
       meta.push(CSVLog.formatDate(state.dataset.startMs) + ', ' +
         CSVLog.formatClock(state.dataset.startMs) + '–' + CSVLog.formatClock(state.dataset.endMs));
@@ -479,7 +479,9 @@
         'font-size:7.5pt;color:#6d7787;overflow-wrap:anywhere}' +
       '.foot{margin-top:14px;padding-top:8px;border-top:1px solid #d6dbe3;font-size:8pt;color:#5b6676}' +
       '</style></head><body>' +
-      '<header class="report-head"><div class="kicker">Peugeot 408 · анализ логов двигателя</div>' +
+      '<header class="report-head"><div class="kicker">' +
+        (report.kind === 'at' ? 'Peugeot 408 · анализ логов АКПП' : 'Peugeot 408 · анализ логов двигателя') +
+      '</div>' +
         '<h1>Автоматический анализ</h1>' +
         meta.map(function (line) { return '<div class="meta">' + escapeHtml(line) + '</div>'; }).join('') +
       '</header>' +

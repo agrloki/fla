@@ -49,6 +49,12 @@
     KnockSensor: [0, 10000],
     KnockSensorThr: [0, 10000],
     AccelPedalPos: [0, 100],
+    InputSpeed: [0, 9000],
+    GearOil: [-40, 200],
+    EngTorque: [-1000, 2000],
+    SPORT: [0, 1],
+    SNOW: [0, 1],
+    GEAR_OIL: [0, 1],
     CanisterValve: [0, 100],
     UpMixCorr: [-50, 50],
     DownMixCorr: [-50, 50]
@@ -78,6 +84,15 @@
     var values = channel ? channel.values.map(function (value) { return sanitize(name, value); }) : null;
     ctx.cache[name] = values;
     return values;
+  }
+
+  function textSeries(ctx, name) {
+    var index = ctx.dataset.headers ? ctx.dataset.headers.indexOf(name) : -1;
+    if (index === -1) return null;
+    return ctx.dataset.rows.map(function (row) {
+      var value = row[index];
+      return value === null || value === undefined ? '' : String(value).trim();
+    });
   }
 
   function pair(ctx, first, second, filter) {
@@ -247,6 +262,11 @@
   function fmtBar(millibar) {
     if (millibar === null || millibar === undefined || !Number.isFinite(millibar)) return '—';
     return fmt(millibar / 1000, 2) + ' бар';
+  }
+
+  function fmtBarPlain(value) {
+    if (value === null || value === undefined || !Number.isFinite(value)) return '—';
+    return fmt(value, 2) + ' бар';
   }
 
   function fmtPercent(value) {
@@ -991,6 +1011,295 @@
     return resultItem('driveline', 'Трансмиссия и динамика', status, summary, details, channels);
   }
 
+  function isAutomaticTransmission(ctx) {
+    var headers = ctx.dataset.headers || [];
+    var present = function (name) { return headers.indexOf(name) !== -1; };
+    var score = ['GearLever', 'InputSpeed', 'GearOil', 'OilPressInstr', 'OilPress', 'ChangingLaw', 'EngTorque']
+      .filter(present).length;
+    return present('GearLever') && score >= 5;
+  }
+
+  function checkAtPressure(ctx) {
+    var actual = series(ctx, 'OilPress');
+    var target = series(ctx, 'OilPressInstr');
+    if (!actual || !target) return skipItem('at-pressure', 'Давление в АКПП', ['OilPress', 'OilPressInstr']);
+    var data = pair(ctx, 'OilPressInstr', 'OilPress');
+    if (data.x.length < 20) {
+      return resultItem('at-pressure', 'Давление в АКПП', 'info', 'Недостаточно данных для оценки давления в АКПП.', [
+        detail('Пар значений', String(data.x.length))
+      ], ['OilPressInstr', 'OilPress']);
+    }
+
+    var errors = data.y.map(function (value, index) { return value - data.x[index]; });
+    var absErrors = errors.map(function (value) { return Math.abs(value); });
+    var medSigned = median(errors);
+    var medAbs = median(absErrors);
+    var p95Abs = quantile(absErrors, 0.95);
+    var maxAbs = maxOf(absErrors);
+    var under = errors.filter(function (value) { return value < -0.5; }).length;
+    var underShare = under / errors.length * 100;
+    var low = data.y.filter(function (value) { return value < 2.7; }).length;
+    var lowShare = low / data.y.length * 100;
+    var rho = spearman(data.x, data.y);
+
+    var details = [
+      detail('Заданное давление', fmtBarPlain(minOf(data.x)) + '…' + fmtBarPlain(maxOf(data.x))),
+      detail('Фактическое давление', fmtBarPlain(minOf(data.y)) + '…' + fmtBarPlain(maxOf(data.y))),
+      detail('Медиана разницы факт−задание', (medSigned >= 0 ? '+' : '') + fmtBarPlain(medSigned)),
+      detail('Медиана |разницы|', fmtBarPlain(medAbs)),
+      detail('p95 |разницы|', fmtBarPlain(p95Abs)),
+      detail('Макс. |разница|', fmtBarPlain(maxAbs)),
+      detail('Корреляция факт ↔ задание', rho === null ? '—' : fmt(rho, 2)),
+      detail('Недодавление > 0,5 бар', under + ' (' + fmtPercent(underShare) + ')'),
+      detail('Фактическое < 2,7 бар', low + ' (' + fmtPercent(lowShare) + ')')
+    ];
+
+    var status = 'ok';
+    if (rho !== null && rho < 0.5) status = 'bad';
+    else if (medAbs !== null && medAbs > 0.5) status = 'bad';
+    else if (lowShare > 20) status = 'bad';
+    else if (rho !== null && rho < 0.8) status = 'warn';
+    else if (p95Abs !== null && p95Abs > 1.5) status = 'warn';
+    else if (lowShare > 5) status = 'warn';
+
+    var summary;
+    if (status === 'bad') summary = 'Фактическое давление в АКПП плохо согласовано с заданием — проверить датчик, регулятор давления и уровень масла.';
+    else if (status === 'warn') summary = 'Есть заметные отклонения или кратковременные просадки давления в АКПП.';
+    else summary = 'Фактическое давление в АКПП отслеживает задание, явных аномалий нет.';
+    return resultItem('at-pressure', 'Давление в АКПП', status, summary, details, ['OilPressInstr', 'OilPress', 'GearOil']);
+  }
+
+  function checkAtTemperature(ctx) {
+    var oil = series(ctx, 'GearOil');
+    if (!oil) return skipItem('at-temperature', 'Температура масла АКПП', ['GearOil']);
+    var values = finiteValues(oil);
+    if (!values.length) return skipItem('at-temperature', 'Температура масла АКПП', ['GearOil']);
+
+    var maxOil = maxOf(values);
+    var minOil = minOf(values);
+    var medOil = median(values);
+    var details = [
+      detail('Диапазон температуры', fmtRange(values, 0, '°C')),
+      detail('Медиана температуры', fmt(medOil, 0) + ' °C'),
+      detail('Максимум температуры', fmt(maxOil, 0) + ' °C')
+    ];
+
+    var start = -1;
+    for (var i = 0; i < ctx.n; i++) {
+      if (oil[i] !== null && oil[i] < 60) { start = i; break; }
+    }
+    if (start !== -1) {
+      var finish = -1;
+      for (var j = start + 1; j < ctx.n; j++) {
+        if (oil[j] !== null && oil[j] >= 80) { finish = j; break; }
+      }
+      if (finish !== -1) {
+        details.push(detail('Прогрев до 80 °C', fmtDuration(ctx.ts[finish] - ctx.ts[start])));
+      } else {
+        details.push(detail('Прогрев до 80 °C', 'не достигнут'));
+      }
+    } else {
+      details.push(detail('Холодный пуск', 'в логе нет'));
+    }
+
+    var status = 'ok';
+    if (maxOil >= 115) status = 'bad';
+    else if (maxOil >= 100) status = 'warn';
+    else if (maxOil < 60) status = 'info';
+
+    var summary;
+    if (status === 'bad') summary = 'Масло АКПП перегрето — требуется проверка охлаждения и уровня.';
+    else if (status === 'warn') summary = 'Температура масла АКПП повышена, стоит проверить теплообменник и нагрузку.';
+    else if (status === 'info') summary = 'Масло АКПП не успело прогреться в этом логе.';
+    else summary = 'Температура масла АКПП в рабочем диапазоне.';
+    return resultItem('at-temperature', 'Температура масла АКПП', status, summary, details, ['GearOil']);
+  }
+
+  function checkAtConverter(ctx) {
+    var revs = series(ctx, 'Revs');
+    var input = series(ctx, 'InputSpeed');
+    var speed = series(ctx, 'Speed');
+    var pedal = series(ctx, 'AccelPedalPos');
+    if (!revs || !input || !speed) return skipItem('at-converter', 'Гидротрансформатор и блокировка', ['Revs', 'InputSpeed', 'Speed']);
+
+    var slips = [];
+    var highLockSlips = [];
+    var loadSlips = [];
+    for (var i = 0; i < ctx.n; i++) {
+      if (revs[i] === null || input[i] === null || speed[i] === null) continue;
+      if (speed[i] <= 20 || input[i] <= 100) continue;
+      var slip = revs[i] - input[i];
+      slips.push(slip);
+      if (speed[i] >= 40 && (!pedal || (pedal[i] !== null && pedal[i] < 12))) highLockSlips.push(Math.abs(slip));
+      if (pedal && pedal[i] !== null && pedal[i] > 20) loadSlips.push(Math.abs(slip));
+    }
+    if (slips.length < 20) {
+      return resultItem('at-converter', 'Гидротрансформатор и блокировка', 'info', 'Недостаточно данных для оценки проскальзывания гидротрансформатора.', [
+        detail('Отсчётов', String(slips.length))
+      ], ['Revs', 'InputSpeed', 'Speed', 'AccelPedalPos']);
+    }
+
+    var absSlips = slips.map(function (value) { return Math.abs(value); });
+    var lockedHigh = highLockSlips.filter(function (value) { return value <= 64; }).length;
+    var lockupShare = highLockSlips.length ? lockedHigh / highLockSlips.length * 100 : null;
+    var positiveShare = slips.filter(function (value) { return value > 64; }).length / slips.length * 100;
+    var medLoadSlip = loadSlips.length ? median(loadSlips) : null;
+
+    var details = [
+      detail('Медиана |проскальзывания|', fmt(median(absSlips), 0) + ' об/мин'),
+      detail('Доля проскальзывания > 64', fmtPercent(positiveShare)),
+      detail('Блокировка на 40+ км/ч без газа', lockupShare === null ? '—' : fmtPercent(lockupShare)),
+      detail('|Проскальзывание| под нагрузкой', medLoadSlip === null ? '—' : fmt(medLoadSlip, 0) + ' об/мин')
+    ];
+
+    var status = 'ok';
+    if (lockupShare !== null && lockupShare < 15) status = 'warn';
+    else if (medLoadSlip !== null && medLoadSlip > 1200) status = 'warn';
+    else if (lockupShare !== null && lockupShare < 30) status = 'info';
+    else if (medLoadSlip === null) status = 'info';
+
+    var summary;
+    if (status === 'warn') summary = 'Гидротрансформатор долго не блокируется или сильно проскальзывает под нагрузкой.';
+    else if (status === 'info') summary = 'Проскальзывание в норме, но режимов полной блокировки в логе мало.';
+    else summary = 'Блокировка гидротрансформатора включается, проскальзывание под нагрузкой умеренное.';
+    return resultItem('at-converter', 'Гидротрансформатор и блокировка', status, summary, details, ['Revs', 'InputSpeed', 'Speed', 'AccelPedalPos']);
+  }
+
+  function atRatioBand(ratio) {
+    if (ratio === null || ratio <= 0) return null;
+    if (ratio > 75) return '1';
+    if (ratio > 50) return '2';
+    return '3';
+  }
+
+  function checkAtShifts(ctx) {
+    var speed = series(ctx, 'Speed');
+    var input = series(ctx, 'InputSpeed');
+    var lever = textSeries(ctx, 'GearLever');
+    if (!speed || !input) return skipItem('at-shifts', 'Переключения и передаточные отношения', ['Speed', 'InputSpeed', 'GearLever']);
+
+    var bands = { '1': [], '2': [], '3': [] };
+    var ratios = [];
+    var transitions = 0;
+    var previousBand = null;
+    for (var i = 0; i < ctx.n; i++) {
+      if (speed[i] === null || input[i] === null) continue;
+      if (speed[i] <= 8 || input[i] <= 200) continue;
+      if (lever && lever[i] !== 'D') continue;
+      var ratio = input[i] / speed[i];
+      ratios.push(ratio);
+      var band = atRatioBand(ratio);
+      if (band) bands[band].push(ratio);
+      if (band && previousBand !== null && band !== previousBand) transitions++;
+      if (band) previousBand = band;
+    }
+    if (ratios.length < 20) {
+      return resultItem('at-shifts', 'Переключения и передаточные отношения', 'info', 'Недостаточно данных для оценки переключений АКПП.', [
+        detail('Отсчётов', String(ratios.length))
+      ], ['Speed', 'InputSpeed', 'GearLever']);
+    }
+
+    var details = [
+      detail('Передача 1: медиана', bands['1'].length ? fmt(median(bands['1']), 1) + ' (' + bands['1'].length + ' отсч.)' : '—'),
+      detail('Передача 2: медиана', bands['2'].length ? fmt(median(bands['2']), 1) + ' (' + bands['2'].length + ' отсч.)' : '—'),
+      detail('Передача 3: медиана', bands['3'].length ? fmt(median(bands['3']), 1) + ' (' + bands['3'].length + ' отсч.)' : '—'),
+      detail('Смен диапазона', String(transitions)),
+      detail('Диапазон отношений', fmt(minOf(ratios), 1) + '…' + fmt(maxOf(ratios), 1))
+    ];
+
+    var status = 'ok';
+    var covered = ['1', '2', '3'].filter(function (band) { return bands[band].length >= 10; }).length;
+    if (covered < 2) status = 'info';
+    if (maxOf(ratios) > 180 || minOf(ratios) < 20) status = 'warn';
+
+    var summary;
+    if (status === 'warn') summary = 'Есть нетипичные отношения входного вала к скорости — проверить датчики и переключения.';
+    else if (status === 'info') summary = 'В логе мало устойчивых диапазонов для оценки всех передач.';
+    else summary = 'Передаточные отношения соответствуют нескольким передачам, явных аномалий нет.';
+    return resultItem('at-shifts', 'Переключения и передаточные отношения', status, summary, details, ['Speed', 'InputSpeed', 'GearLever', 'EngTorque']);
+  }
+
+  function checkAtModes(ctx) {
+    var law = textSeries(ctx, 'ChangingLaw');
+    var sport = series(ctx, 'SPORT');
+    var snow = series(ctx, 'SNOW');
+    var gearOil = series(ctx, 'GEAR_OIL');
+    var errors = series(ctx, 'Errors');
+    if (!law && !sport && !snow && !gearOil && !errors) {
+      return skipItem('at-modes', 'Режимы и ошибки АКПП', ['ChangingLaw', 'SPORT', 'SNOW', 'GEAR_OIL', 'Errors']);
+    }
+
+    var laws = [];
+    if (law) {
+      law.forEach(function (value) {
+        if (value && laws.indexOf(value) === -1) laws.push(value);
+      });
+    }
+    var sportCount = finiteValues(sport).filter(function (value) { return value > 0; }).length;
+    var snowCount = finiteValues(snow).filter(function (value) { return value > 0; }).length;
+    var gearOilCount = finiteValues(gearOil).filter(function (value) { return value > 0; }).length;
+    var errorsCount = finiteValues(errors).filter(function (value) { return value > 0; }).length;
+
+    var details = [
+      detail('Закон переключения', laws.length ? laws.join(', ') : '—'),
+      detail('Отсчётов SPORT', String(sportCount)),
+      detail('Отсчётов SNOW', String(snowCount)),
+      detail('Индикатор масла АКПП', String(gearOilCount)),
+      detail('Отсчётов с ошибками', String(errorsCount))
+    ];
+
+    var status = 'ok';
+    if (errorsCount > 0 || gearOilCount > 0) status = 'bad';
+    else if (sportCount > 0 && snowCount > 0) status = 'info';
+
+    var summary;
+    if (status === 'bad') summary = 'АКПП сообщает об ошибке или индикаторе масла — требуется чтение кодов и проверка.';
+    else if (status === 'info') summary = 'В логе одновременно встречаются режимы SPORT и SNOW — проверьте корректность переключения.';
+    else summary = 'Режимы АКПП и флаги ошибок в норме.';
+    return resultItem('at-modes', 'Режимы и ошибки АКПП', status, summary, details, ['ChangingLaw', 'SPORT', 'SNOW', 'GEAR_OIL', 'Errors']);
+  }
+
+  function checkAtSelector(ctx) {
+    var lever = textSeries(ctx, 'GearLever');
+    var speed = series(ctx, 'Speed');
+    if (!lever || !speed) return skipItem('at-selector', 'Селектор АКПП', ['GearLever', 'Speed']);
+
+    var counts = {};
+    var maxSpeed = {};
+    var pViolations = 0;
+    var rViolations = 0;
+    for (var i = 0; i < ctx.n; i++) {
+      var position = lever[i] || '—';
+      counts[position] = (counts[position] || 0) + 1;
+      if (speed[i] === null) continue;
+      if (maxSpeed[position] === undefined || speed[i] > maxSpeed[position]) maxSpeed[position] = speed[i];
+      if (position === 'P' && speed[i] > 1) pViolations++;
+      if (position === 'R' && speed[i] > 10) rViolations++;
+    }
+
+    var order = ['P', 'R', 'N', 'D', 'M', '—'];
+    var lines = [];
+    order.forEach(function (position) {
+      if (!counts[position]) return;
+      lines.push(position + ': ' + counts[position] + ' (макс. ' + fmt(maxSpeed[position], 0) + ' км/ч)');
+    });
+    var details = [
+      detail('Позиции селектора', lines.join('; ')),
+      detail('Скорость в P > 1 км/ч', String(pViolations)),
+      detail('Скорость в R > 10 км/ч', String(rViolations))
+    ];
+
+    var status = 'ok';
+    if (pViolations > 0 || rViolations > 0) status = 'warn';
+    if ((maxSpeed.P || 0) > 5 || (maxSpeed.R || 0) > 25) status = 'bad';
+
+    var summary;
+    if (status === 'bad') summary = 'Селектор АКПП находится в P или R при заметной скорости — проверить датчик селектора.';
+    else if (status === 'warn') summary = 'Есть кратковременное движение в P или R, стоит проверить датчик селектора.';
+    else summary = 'Положение селектора согласовано со скоростью автомобиля.';
+    return resultItem('at-selector', 'Селектор АКПП', status, summary, details, ['GearLever', 'Speed']);
+  }
+
   function checkWarmupIdle(ctx) {
     var speed = series(ctx, 'Speed');
     var revs = series(ctx, 'Revs');
@@ -1047,7 +1356,15 @@
   function analyze(dataset) {
     if (!dataset || !dataset.channelsByName) throw new Error('Нет данных для анализа.');
     var ctx = makeContext(dataset);
-    var results = [
+    var automatic = isAutomaticTransmission(ctx);
+    var results = automatic ? [
+      checkAtPressure(ctx),
+      checkAtTemperature(ctx),
+      checkAtConverter(ctx),
+      checkAtShifts(ctx),
+      checkAtModes(ctx),
+      checkAtSelector(ctx)
+    ] : [
       checkValveLift(ctx),
       checkCamPhasers(ctx),
       checkTorqueModel(ctx),
@@ -1071,6 +1388,7 @@
     return {
       fileName: dataset.fileName,
       generatedAt: Date.now(),
+      kind: automatic ? 'at' : 'engine',
       results: results,
       counts: counts,
       status: status
