@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Анализ логов двигателя</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <div id="dropOverlay" class="drop-overlay">
+    <div class="drop-overlay-box">
+      <div class="drop-overlay-title">Отпустите файл, чтобы открыть</div>
+      <div class="drop-overlay-sub">Поддерживаются CSV с разделителем «;» или «,»</div>
+    </div>
+  </div>
+
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32" width="32" height="32">
+          <path d="M4 24 L11 15 L17 19 L24 8 L28 11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="24" cy="8" r="2.4" fill="currentColor"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>Анализ логов двигателя</h1>
+        <p id="fileMeta" class="file-meta">Загрузите CSV-файл с параметрами работы двигателя</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <select id="fileSelect" class="file-select" hidden aria-label="Доступные файлы"></select>
+      <button id="openBtn" class="btn primary" type="button">Открыть CSV</button>
+      <input id="fileInput" type="file" accept=".csv,.txt,text/csv" hidden>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <div class="selected-summary">
+          <span class="selected-title">Параметры</span>
+          <span id="selCount" class="badge">0</span>
+          <button id="clearBtn" class="link-btn" type="button">Очистить</button>
+        </div>
+        <input id="searchInput" class="search" type="search" placeholder="Поиск параметра…" autocomplete="off" disabled>
+        <div id="presets" class="presets"></div>
+      </div>
+      <div id="channelList" class="channel-list">
+        <div class="sidebar-empty">Откройте файл, чтобы увидеть список доступных параметров.</div>
+      </div>
+      <div class="sidebar-foot">
+        Отметьте один или несколько параметров. Совместный режим накладывает кривые друг на друга,
+        режим «Отдельные» строит синхронизированные графики.
+      </div>
+    </aside>
+
+    <section class="content">
+      <div id="emptyState" class="empty-state">
+        <div class="empty-card">
+          <div class="empty-icon" aria-hidden="true">
+            <svg viewBox="0 0 48 48" width="48" height="48">
+              <rect x="4" y="7" width="40" height="34" rx="4" fill="none" stroke="currentColor" stroke-width="2"/>
+              <path d="M10 32 L18 22 L25 27 L33 14 L39 18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <h2>Откройте лог для анализа</h2>
+          <p>Перетащите CSV-файл в окно или выберите его на диске. Данные обрабатываются локально в браузере и никуда не отправляются.</p>
+          <button id="emptyOpenBtn" class="btn primary" type="button">Выбрать файл</button>
+          <div class="empty-hint">Формат: <code>Date;Time;Параметр1;Параметр2;…</code></div>
+        </div>
+      </div>
+
+      <div id="workspace" class="workspace" hidden>
+        <div class="toolbar">
+          <div id="modeSwitch" class="segmented" role="tablist" aria-label="Режим отображения">
+            <button type="button" data-mode="combined" class="active" role="tab" aria-selected="true">Совместный</button>
+            <button type="button" data-mode="separate" role="tab" aria-selected="false">Отдельные</button>
+          </div>
+          <label id="normalizeWrap" class="switch" title="Привести каждый параметр к диапазону 0–100 %">
+            <input id="normalizeToggle" type="checkbox" checked>
+            <span class="switch-ui"></span>
+            <span>Нормировать 0–100 %</span>
+          </label>
+          <button id="analyzeBtn" class="btn analysis" type="button" title="Выполнить автоматический анализ выбранного лога">Автоматический анализ</button>
+          <div class="spacer"></div>
+          <button id="resetZoomBtn" class="btn ghost" type="button" title="Вернуть исходный диапазон времени">Сброс масштаба</button>
+          <button id="exportPngBtn" class="btn ghost" type="button" title="Сохранить график как PNG">PNG</button>
+          <button id="exportCsvBtn" class="btn ghost" type="button" title="Сохранить выбранные параметры в CSV">CSV</button>
+        </div>
+
+        <div id="analysisPanel" class="analysis-panel" hidden>
+          <div class="analysis-head">
+            <div class="analysis-head-text">
+              <div class="analysis-title">Автоматический анализ</div>
+              <div id="analysisMeta" class="analysis-meta"></div>
+            </div>
+            <div class="analysis-actions">
+              <button id="analysisPdfBtn" class="btn ghost analysis-pdf-btn" type="button" title="Открыть печать и сохранить отчёт как PDF">Экспорт PDF</button>
+              <button id="analysisCloseBtn" class="link-btn" type="button">Скрыть</button>
+            </div>
+          </div>
+          <div id="analysisSummary" class="analysis-summary"></div>
+          <div id="analysisResults" class="analysis-results"></div>
+          <div class="analysis-foot">
+            Корреляции считаются по Спирмену на очищенных данных. Артефакты и пропуски исключаются,
+            результат носит диагностический характер и требует проверки по возможности.
+          </div>
+        </div>
+
+        <div id="gearStripWrap" class="gear-strip-wrap" hidden>
+          <div class="gear-strip-head">
+            <span class="gear-strip-title">Передача</span>
+            <div id="gearLegend" class="gear-legend"></div>
+          </div>
+          <div id="gearStrip" class="gear-strip"></div>
+        </div>
+
+        <div id="stats" class="stats"></div>
+
+        <div class="chart-card">
+          <div id="chart" class="chart"></div>
+        </div>
+        <div class="chart-hint">
+          Колесо мыши — масштаб, перетаскивание — панорама, двойной клик — сброс.
+          Наведите курсор на график, чтобы увидеть значения.
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="vendor/plotly.min.js"></script>
+  <script src="js/channels.js"></script>
+  <script src="js/csv.js"></script>
+  <script src="js/analysis.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
