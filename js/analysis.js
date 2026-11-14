@@ -62,6 +62,21 @@
 
   var STATUS_RANK = { skip: 0, ok: 1, info: 2, warn: 3, bad: 4 };
 
+  // Заводские ориентиры системы охлаждения EP6 (управляемый термостат).
+  var COOLING = {
+    normalLow: 102,
+    normalHigh: 105,
+    thermostatOpenLow: 89,
+    thermostatOpenHigh: 95,
+    thermostatFullOpen: 105,
+    fanOn: 108,
+    fanOff: 90,
+    fanReengage: 96,
+    warnTemp: 110,
+    badTemp: 115,
+    warmTarget: 100
+  };
+
   function sanitize(name, value) {
     if (value === null || value === undefined || !Number.isFinite(value)) return null;
     var limit = LIMITS[name];
@@ -803,38 +818,89 @@
     return best;
   }
 
+  function warmupTo(ctx, name, coldBelow, target) {
+    var values = series(ctx, name);
+    if (!values) return { start: -1, finish: -1, ms: null };
+    var start = -1;
+    var i;
+    for (i = 0; i < ctx.n; i++) {
+      if (values[i] !== null && values[i] < coldBelow) { start = i; break; }
+    }
+    if (start === -1) return { start: -1, finish: -1, ms: null };
+    for (i = start + 1; i < ctx.n; i++) {
+      if (values[i] !== null && values[i] >= target) {
+        return { start: start, finish: i, ms: ctx.ts[i] - ctx.ts[start] };
+      }
+    }
+    return { start: start, finish: -1, ms: null };
+  }
+
+  function countCoolingDrops(ctx, name, threshold, drop, windowMs) {
+    var values = series(ctx, name);
+    if (!values) return 0;
+    var events = 0;
+    var i;
+    for (i = 0; i < ctx.n; i++) {
+      if (values[i] === null || values[i] < threshold) continue;
+      for (var j = i + 1; j < ctx.n; j++) {
+        if (ctx.ts[j] - ctx.ts[i] > windowMs) break;
+        if (values[j] !== null && values[j] <= values[i] - drop) {
+          events++;
+          i = j;
+          break;
+        }
+      }
+    }
+    return events;
+  }
+
   function checkCooling(ctx) {
     var coolant = series(ctx, 'Coolant');
     if (!coolant) return skipItem('cooling', 'Охлаждение', ['Coolant', 'ECUtemp', 'ExternalTemp']);
     var values = finiteValues(coolant);
     if (!values.length) return skipItem('cooling', 'Охлаждение', ['Coolant']);
-    var maxCoolant = maxOf(values);
-    var atLimit = values.filter(function (value) { return value >= 105; }).length;
-    var sustained = maxConsecutive(coolant, function (value) { return value !== null && value >= 105; });
-    var stepMs = ctx.dataset.stepMs || 500;
-    var details = [
-      detail('Максимум ОЖ', fmt(maxCoolant, 1) + ' °C'),
-      detail('Отсчётов ≥ 105 °C', atLimit + ' (' + fmtDuration(sustained * stepMs) + ' подряд)')
-    ];
-    var status = 'ok';
 
-    var start = -1;
-    for (var i = 0; i < ctx.n; i++) {
-      if (coolant[i] !== null && coolant[i] < 60) { start = i; break; }
-    }
-    if (start !== -1) {
-      var finish = -1;
-      for (var j = start + 1; j < ctx.n; j++) {
-        if (coolant[j] !== null && coolant[j] >= 80) { finish = j; break; }
-      }
-      if (finish !== -1) {
-        var warmupMs = ctx.ts[finish] - ctx.ts[start];
-        details.push(detail('Прогрев до 80 °C', fmtDuration(warmupMs)));
-        if (warmupMs > 25 * 60 * 1000) status = 'warn';
-        else if (warmupMs > 15 * 60 * 1000) status = 'info';
+    var maxCoolant = maxOf(values);
+    var medCoolant = median(values);
+    var stepMs = ctx.dataset.stepMs || 500;
+    var durationMs = ctx.dataset.durationMs || (ctx.ts[ctx.n - 1] - ctx.ts[0]);
+
+    var inNormal = values.filter(function (value) {
+      return value >= COOLING.normalLow && value <= COOLING.normalHigh;
+    }).length;
+    var inNormalShare = inNormal / values.length * 100;
+    var aboveNormal = values.filter(function (value) { return value > COOLING.normalHigh; }).length;
+    var atFan = values.filter(function (value) { return value >= COOLING.fanOn; }).length;
+    var aboveWarn = values.filter(function (value) { return value >= COOLING.warnTemp; }).length;
+    var sustainedWarn = maxConsecutive(coolant, function (value) {
+      return value !== null && value >= COOLING.warnTemp;
+    });
+    var sustainedFan = maxConsecutive(coolant, function (value) {
+      return value !== null && value >= COOLING.fanOn;
+    });
+    var fanDrops = countCoolingDrops(ctx, 'Coolant', COOLING.fanOn, 8, 90000);
+
+    var details = [
+      detail('Штатный диапазон', COOLING.normalLow + '–' + COOLING.normalHigh + ' °C'),
+      detail('Термостат', 'начало ' + COOLING.thermostatOpenLow + '–' + COOLING.thermostatOpenHigh +
+        ' °C, полное открытие ' + COOLING.thermostatFullOpen + ' °C'),
+      detail('Вентилятор', 'включение ' + COOLING.fanOn + ' °C, сброс к ' + COOLING.fanOff + ' °C, повтор от ' + COOLING.fanReengage + ' °C'),
+      detail('Температура ОЖ', fmtRange(values, 0, '°C')),
+      detail('Медиана ОЖ', fmt(medCoolant, 0) + ' °C'),
+      detail('Максимум ОЖ', fmt(maxCoolant, 0) + ' °C'),
+      detail('Отсчётов в ' + COOLING.normalLow + '–' + COOLING.normalHigh + ' °C', inNormal + ' (' + fmtPercent(inNormalShare) + ')'),
+      detail('Отсчётов выше ' + COOLING.normalHigh + ' °C', String(aboveNormal)),
+      detail('Отсчётов ≥ ' + COOLING.fanOn + ' °C', String(atFan)),
+      detail('Отсчётов ≥ ' + COOLING.warnTemp + ' °C', aboveWarn + ' (' + fmtDuration(sustainedWarn * stepMs) + ' подряд)'),
+      detail('Срабатывания вентилятора (спад ≥ 8 °C)', String(fanDrops))
+    ];
+
+    var warm = warmupTo(ctx, 'Coolant', 60, COOLING.warmTarget);
+    if (warm.start !== -1) {
+      if (warm.finish !== -1) {
+        details.push(detail('Выход на ' + COOLING.warmTarget + ' °C', fmtDuration(warm.ms)));
       } else {
-        details.push(detail('Прогрев до 80 °C', 'не достигнут'));
-        if (status === 'ok') status = 'warn';
+        details.push(detail('Выход на ' + COOLING.warmTarget + ' °C', 'не достигнут'));
       }
     } else {
       details.push(detail('Холодный пуск', 'в логе нет'));
@@ -853,14 +919,20 @@
       if (revCorr) details.push(detail('ОЖ ↔ обороты', fmt(revCorr.rho, 2)));
     }
 
-    if (maxCoolant >= 115 || sustained * stepMs >= 30000) status = 'bad';
-    else if (maxCoolant >= 105 && sustained * stepMs >= 5000) status = 'warn';
+    var status = 'ok';
+    if (maxCoolant >= COOLING.badTemp || sustainedWarn * stepMs >= 15000) status = 'bad';
+    else if (maxCoolant >= COOLING.warnTemp || sustainedFan * stepMs >= 60000) status = 'warn';
+    else if (maxCoolant < 95 && durationMs > 10 * 60 * 1000) status = 'warn';
+    else if (maxCoolant < COOLING.warmTarget) status = 'info';
+    else if (warm.ms !== null && warm.ms > 15 * 60 * 1000) status = 'info';
+
+    if (atFan > 0 && fanDrops === 0 && STATUS_RANK[status] < STATUS_RANK.warn) status = 'warn';
 
     var summary;
-    if (status === 'bad') summary = 'Охлаждающая жидкость достигает опасной температуры или долго держится выше 105 °C.';
-    else if (status === 'warn') summary = 'Есть заметный нагрев ОЖ или длительное удержание около 105 °C.';
-    else if (status === 'info') summary = 'Температура ОЖ в норме, но прогрев медленный — стоит оценить термостат и нагрузку.';
-    else summary = 'Температура охлаждающей жидкости в рабочем диапазоне.';
+    if (status === 'bad') summary = 'ОЖ достигает опасной температуры (' + COOLING.badTemp + ' °C и выше) или долго держится выше ' + COOLING.warnTemp + ' °C.';
+    else if (status === 'warn') summary = 'ОЖ выше ' + COOLING.warnTemp + ' °C, вентилятор не сбрасывает температуру, либо двигатель не выходит на штатные ' + COOLING.normalLow + '–' + COOLING.normalHigh + ' °C.';
+    else if (status === 'info') summary = 'Температура ОЖ в допустимых пределах, но двигатель не прогрелся до ' + COOLING.warmTarget + ' °C или прогрев медленный.';
+    else summary = 'ОЖ в штатном диапазоне ' + COOLING.normalLow + '–' + COOLING.normalHigh + ' °C, вентилятор при необходимости сбрасывает температуру.';
     return resultItem('cooling', 'Охлаждение', status, summary, details, ['Coolant', 'ECUtemp', 'ExternalTemp', 'Revs']);
   }
 
@@ -1323,22 +1395,14 @@
     }
 
     if (coolant) {
-      var start = -1;
-      for (var i = 0; i < ctx.n; i++) {
-        if (coolant[i] !== null && coolant[i] < 60) { start = i; break; }
-      }
-      if (start !== -1) {
-        var finish = -1;
-        for (var j = start + 1; j < ctx.n; j++) {
-          if (coolant[j] !== null && coolant[j] >= 80) { finish = j; break; }
-        }
-        if (finish !== -1) {
-          var warmupMs = ctx.ts[finish] - ctx.ts[start];
-          details.push(detail('Прогрев до 80 °C', fmtDuration(warmupMs)));
-          if (warmupMs > 25 * 60 * 1000) status = 'warn';
-          else if (warmupMs > 15 * 60 * 1000 && status === 'ok') status = 'info';
+      var warm = warmupTo(ctx, 'Coolant', 60, COOLING.warmTarget);
+      if (warm.start !== -1) {
+        if (warm.finish !== -1) {
+          details.push(detail('Выход на ' + COOLING.warmTarget + ' °C', fmtDuration(warm.ms)));
+          if (warm.ms > 25 * 60 * 1000) status = 'warn';
+          else if (warm.ms > 15 * 60 * 1000 && status === 'ok') status = 'info';
         } else {
-          details.push(detail('Прогрев до 80 °C', 'не достигнут'));
+          details.push(detail('Выход на ' + COOLING.warmTarget + ' °C', 'не достигнут'));
           if (status === 'ok') status = 'warn';
         }
       } else {
